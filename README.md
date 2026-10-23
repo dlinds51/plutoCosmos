@@ -67,17 +67,17 @@ All controls and **visualizations** stay in **COSMOS Telemetry Viewer**. No sepa
                         WINDOWS HOST
   ┌──────────────────────────────────────────────────────────┐
   │ Web browser → OpenC3 COSMOS (Docker Desktop)             │
-  │   Telemetry Viewer: Spectrum | ADS-B | FM               │
-  │   Commands, PNG/FFT/aircraft/RDS telemetry, logging       │
+  │   Telemetry Viewer: Spectrum | ADS-B | FM                │
+  │   Commands, PNG/FFT/aircraft/RDS telemetry, logging      │
   └────────────────────────┬─────────────────────────────────┘
                            │ TCP/IP (host.docker.internal:7350)
   ┌────────────────────────▼─────────────────────────────────┐
-  │ UBUNTU / WSL2          Python bridge                    │
+  │ UBUNTU / WSL2          Python bridge                     │
   │   bridge/pluto_bridge.py                                 │
   │                                                          │
-  │   Spectrum: I/Q → FFT / peak hold / waterfall PNG         │
-  │   ADS-B:    readsb → aircraft.json → map / telemetry      │
-  │   FM:       I/Q → FM MPX → stereo PCM + audio FFT          │
+  │   Spectrum: I/Q → FFT / peak hold / waterfall PNG        │
+  │   ADS-B:    readsb → aircraft.json → map / telemetry     │
+  │   FM:       I/Q → FM MPX → stereo PCM + audio FFT        │
   │                            ├→ redsea → RDS telemetry     │
   │                            └→ pacat → WSLg → speakers    │
   └────────────────────────┬─────────────────────────────────┘
