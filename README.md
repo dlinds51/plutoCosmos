@@ -50,7 +50,7 @@ All controls and **visualizations** stay in **COSMOS Telemetry Viewer**. No sepa
 - **Home latitude/longitude** and **map latitude/longitude spans** are editable on the ADS-B screen. The map is a fixed region centered on home (rather than auto-zooming), and **Clear Tracks** empties history without resetting the region.
 - An aircraft's position or other fields can legitimately be missing until sufficient messages have been received. A dash means *unknown*, not zero.
 
-**Privacy:** The current map configuration includes a default home/station position. Review the defaults in `bridge/adsb.py` and `cosmos-plugin/targets/PLUTO_SDR/screens/adsb.txt` before publishing a public fork; change them if they identify a private location.
+
 
 ### FM broadcast receiver
 
