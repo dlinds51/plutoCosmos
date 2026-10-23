@@ -17,7 +17,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from adsb import (ADSBRuntime, AircraftMap, make_adsb_table, make_adsb_event, make_adsb_map,
-                  normalize_aircraft, ADSB_TABLE_ID, ADSB_EVENT_ID, ADSB_MAP_ID)
+                  normalize_aircraft, ADSB_TABLE_ID, ADSB_EVENT_ID, ADSB_MAP_ID,
+                  DEFAULT_HOME_LAT, DEFAULT_HOME_LON, DEFAULT_LAT_SPAN, DEFAULT_LON_SPAN)
 
 LOG = logging.getLogger("pluto_cosmos")
 PORT = 7350
@@ -35,6 +36,8 @@ CMD_WF_RANGE = 105
 CMD_CLEAR_WF = 106
 CMD_ADSB_START = 107
 CMD_ADSB_STOP = 108
+CMD_MAP_CFG = 109
+CMD_CLEAR_TRACKS = 110
 CONFIG_FMT = ">IHQIIIffBB"
 CONFIG_SIZE = struct.calcsize(CONFIG_FMT)  # 36 bytes
 CONFIG_V2_FMT = ">IHQIIIffBBI"  # Existing CONFIG + receive RF bandwidth
@@ -375,7 +378,8 @@ def serve(args: argparse.Namespace) -> None:
                 adsb_seq = 0
                 next_adsb = 0.0
                 aircraft_seen_messages = {}
-                adsb_map = AircraftMap()
+                adsb_map = AircraftMap(home_lat=DEFAULT_HOME_LAT, home_lon=DEFAULT_HOME_LON,
+                                      lat_span=DEFAULT_LAT_SPAN, lon_span=DEFAULT_LON_SPAN)
                 try:
                     conn.sendall(make_status_frame(seq, status))
                     while True:
@@ -465,6 +469,17 @@ def serve(args: argparse.Namespace) -> None:
                                                 waterfall.reset()
                                                 hold.fill(-160)
                                             status = 'SPECTRUM RESTORED'
+                                        elif typ == CMD_MAP_CFG:
+                                            if len(frame) != MAP_CFG_SIZE:
+                                                raise ValueError('MAP_CFG frame length mismatch')
+                                            _, _, home_lat, home_lon, lat_span, lon_span = struct.unpack(MAP_CFG_FMT, frame)
+                                            adsb_map.set_region(home_lat, home_lon, lat_span, lon_span)
+                                            status = 'MAP CONFIG APPLIED'
+                                        elif typ == CMD_CLEAR_TRACKS:
+                                            if len(frame) != 6:
+                                                raise ValueError('CLEAR_TRACKS frame length mismatch')
+                                            adsb_map.clear_tracks()
+                                            status = 'TRACKS CLEARED'
                                         elif typ == CMD_START:
                                             if mode == 'adsb':
                                                 adsb.stop()
