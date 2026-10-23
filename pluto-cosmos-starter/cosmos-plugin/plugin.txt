@@ -1,0 +1,5 @@
+# COSMOS runs in Docker Desktop; Windows resolves WSL2 localhost forwarding.
+# Change host.docker.internal if your networking needs a different endpoint.
+TARGET PLUTO_SDR PLUTO_SDR
+INTERFACE PLUTO_SDR_INT openc3/interfaces/tcpip_client_interface.py host.docker.internal 7350 7350 10.0 None LENGTH 0 32 0 1 BIG_ENDIAN 0
+  MAP_TARGET PLUTO_SDR

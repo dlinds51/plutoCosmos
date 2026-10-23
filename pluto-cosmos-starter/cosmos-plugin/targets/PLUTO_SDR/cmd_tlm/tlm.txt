@@ -1,0 +1,25 @@
+# Fixed 512-element arrays let ARRAYPLOT display a fast, small spectrum.
+# Frequency axis currently represents 512 equally spaced bins, and LEFT_MHZ / RIGHT_MHZ
+# describe the physical frequency limits. RBW_KHZ is actual FFT bin resolution.
+TELEMETRY PLUTO_SDR SPECTRUM BIG_ENDIAN "Pluto receiver spectrum and peak hold"
+  APPEND_ITEM LENGTH 32 UINT "Total packet size"
+  APPEND_ID_ITEM TYPE 16 UINT 1 "Spectrum packet"
+  APPEND_ITEM SEQ 32 UINT "Monotonic frame sequence"
+  APPEND_ITEM CENTER_MHZ 32 FLOAT "Center frequency MHz"
+  APPEND_ITEM LEFT_MHZ 32 FLOAT "Left edge MHz"
+  APPEND_ITEM RIGHT_MHZ 32 FLOAT "Right edge MHz"
+  APPEND_ITEM RATE_MSPS 32 FLOAT "Sampling MSPS"
+  APPEND_ITEM SPAN_MHZ 32 FLOAT "Displayed span MHz"
+  APPEND_ITEM FFT_SIZE 32 UINT "FFT sample count"
+  APPEND_ITEM GAIN_DB 32 FLOAT "Configured manual gain dB"
+  APPEND_ITEM PEAK_MHZ 32 FLOAT "Peak center frequency MHz"
+  APPEND_ITEM PEAK_DBFS 32 FLOAT "Peak relative power dBFS"
+  APPEND_ITEM RBW_KHZ 32 FLOAT "FFT bin resolution kHz"
+  APPEND_ARRAY_ITEM POWER_DBFS 32 FLOAT 16384 "512 spectral relative power bins dBFS"
+  APPEND_ARRAY_ITEM HOLD_DBFS 32 FLOAT 16384 "512-bin peak-hold spectrum dBFS"
+
+TELEMETRY PLUTO_SDR STATUS BIG_ENDIAN "Bridge operation / configuration errors"
+  APPEND_ITEM LENGTH 32 UINT "Total packet size"
+  APPEND_ID_ITEM TYPE 16 UINT 2 "Status packet"
+  APPEND_ITEM SEQ 32 UINT "Sequence of last spectrum"
+  APPEND_ITEM MESSAGE 512 STRING "Bridge state or last error"

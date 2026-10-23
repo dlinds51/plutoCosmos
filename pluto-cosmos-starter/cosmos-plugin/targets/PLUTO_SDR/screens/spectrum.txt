@@ -1,0 +1,55 @@
+SCREEN AUTO AUTO 0.25
+VERTICALBOX
+  TITLE "PLUTO SDR - SPECTRUM ANALYZER"
+  LABEL "All displayed power is relative dBFS, not calibrated dBm. Receive only."
+  HORIZONTALBOX
+    LABEL "Center (MHz)"
+    NAMED_WIDGET CENTER TEXTFIELD 10 "915.0"
+    LABEL "Span (MHz)"
+    NAMED_WIDGET SPAN TEXTFIELD 8 "1.6"
+    LABEL "Sample rate (MSPS)"
+    NAMED_WIDGET RATE TEXTFIELD 8 "2.0"
+    LABEL "FFT size"
+    NAMED_WIDGET FFT TEXTFIELD 7 "2048"
+  END
+  HORIZONTALBOX
+    LABEL "Gain (dB)"
+    NAMED_WIDGET GAIN TEXTFIELD 6 "40"
+    LABEL "Avg FFTs"
+    NAMED_WIDGET AVG TEXTFIELD 4 "8"
+    LABEL "AGC (0/1)"
+    NAMED_WIDGET AGC TEXTFIELD 3 "0"
+    LABEL "Updates/s (1,2,5)"
+    NAMED_WIDGET FPS TEXTFIELD 3 "2"
+  END
+  HORIZONTALBOX
+    BUTTON "Apply settings" "api.cmd('PLUTO_SDR CONFIG with CENTER_HZ ' + Math.round(parseFloat(screen.getNamedWidget('CENTER').text())*1e6) + ', SPAN_HZ ' + Math.round(parseFloat(screen.getNamedWidget('SPAN').text())*1e6) + ', SAMPLE_RATE ' + Math.round(parseFloat(screen.getNamedWidget('RATE').text())*1e6) + ', FFT_SIZE ' + parseInt(screen.getNamedWidget('FFT').text()) + ', GAIN_DB ' + parseFloat(screen.getNamedWidget('GAIN').text()) + ', AVERAGES ' + parseInt(screen.getNamedWidget('AVG').text()) + ', AGC ' + parseInt(screen.getNamedWidget('AGC').text()) + ', FPS ' + parseInt(screen.getNamedWidget('FPS').text()))"
+    BUTTON "Start" "api.cmd('PLUTO_SDR START')"
+    BUTTON "Stop" "api.cmd('PLUTO_SDR STOP')"
+    BUTTON "Clear Peak Hold" "api.cmd('PLUTO_SDR CLEAR_HOLD')"
+  END
+  ARRAYPLOT
+    SETTING TITLE "Live spectrum (horizontal axis: 0–511; left/right MHz shown below)"
+    SETTING ITEM PLUTO_SDR SPECTRUM POWER_DBFS
+    SETTING ITEM PLUTO_SDR SPECTRUM HOLD_DBFS
+    SETTING SIZE 950 440
+  HORIZONTALBOX
+    LABEL "Left (MHz)"
+    VALUE PLUTO_SDR SPECTRUM LEFT_MHZ
+    LABEL "Right (MHz)"
+    VALUE PLUTO_SDR SPECTRUM RIGHT_MHZ
+    LABEL "Peak (MHz)"
+    VALUE PLUTO_SDR SPECTRUM PEAK_MHZ
+    LABEL "Peak (dBFS)"
+    VALUE PLUTO_SDR SPECTRUM PEAK_DBFS
+  END
+  HORIZONTALBOX
+    LABEL "Actual RBW (kHz)"
+    VALUE PLUTO_SDR SPECTRUM RBW_KHZ
+    LABEL "FFT"
+    VALUE PLUTO_SDR SPECTRUM FFT_SIZE
+    LABEL "Frame"
+    VALUE PLUTO_SDR SPECTRUM SEQ
+  END
+  LABELVALUE PLUTO_SDR STATUS MESSAGE
+END
