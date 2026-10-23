@@ -7,6 +7,8 @@ This project connects an **Analog Devices ADALM-PLUTO (PlutoSDR)** to **OpenC3 C
 **Current project version:** `v0.7.0` · **Status:** Spectrum, ADS-B, and FM operation demonstrated on real hardware; 28 automated tests pass. Reception quality, station metadata, and DSP performance depend on hardware, signal conditions, and local system configuration.
 
 > **Scope:** This is a hobby/learning and systems-integration project, not a calibrated spectrum analyzer, certified surveillance receiver, or aviation-safety system. All modes are **receive-only**.
+>
+> [OpenC3 COSMOS](https://youtu.be/DD96PllEinE ) - video of functionality
 
 ## Contents
 
