@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""PLUTO_SDR ↔ OpenC3 COSMOS phase-1 TCP bridge (receive-only)."""
+"""PLUTO_SDR ↔ OpenC3 COSMOS spectrum and ADS-B bridge (receive-only)."""
 from __future__ import annotations
 
 import argparse
 import base64
 import logging
 import math
+import gc
 import zlib
 import select
 import socket
@@ -14,6 +15,9 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
+
+from adsb import (ADSBRuntime, make_adsb_table, make_adsb_event, normalize_aircraft,
+                  ADSB_TABLE_ID, ADSB_EVENT_ID)
 
 LOG = logging.getLogger("pluto_cosmos")
 PORT = 7350
@@ -28,6 +32,8 @@ CMD_CLEAR_HOLD = 103
 CMD_CONFIG_V2 = 104
 CMD_WF_RANGE = 105
 CMD_CLEAR_WF = 106
+CMD_ADSB_START = 107
+CMD_ADSB_STOP = 108
 CONFIG_FMT = ">IHQIIIffBB"
 CONFIG_SIZE = struct.calcsize(CONFIG_FMT)  # 36 bytes
 CONFIG_V2_FMT = ">IHQIIIffBBI"  # Existing CONFIG + receive RF bandwidth
@@ -132,6 +138,20 @@ class InputSource:
         # A single subsequent discard clears samples acquired before retuning.
         self.discard_next = (old is None or old.center_hz != cfg.center_hz or
                              buffer_change or rate_change)
+
+    def release(self) -> None:
+        """Release SDR handles before readsb claims the one Pluto receiver."""
+        device = self.dev
+        self.dev = None
+        self.applied = None
+        self.discard_next = False
+        if device is not None:
+            try:
+                device.rx_destroy_buffer()
+            except (OSError, ConnectionError) as exc:
+                LOG.warning('SDR buffer release warning: %s', exc)
+            del device
+            gc.collect()
 
     def configure(self, cfg: Config) -> None:
         if self.simulated:
@@ -327,6 +347,8 @@ def serve(args: argparse.Namespace) -> None:
     except Exception:
         LOG.exception("Pluto initialization failed. Check libiio routing / connectivity")
         raise
+    adsb = ADSBRuntime(uri=args.uri, simulated=args.simulate,
+                       readsb_path=args.readsb_path, log_path=args.readsb_log)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((args.listen, args.port))
@@ -348,6 +370,10 @@ def serve(args: argparse.Namespace) -> None:
                 next_send = time.monotonic()
                 last_status = 0.0
                 status = "SIMULATION" if args.simulate else "PLUTO CONNECTED"
+                mode = 'spectrum'
+                adsb_seq = 0
+                next_adsb = 0.0
+                aircraft_seen_messages = {}
                 try:
                     conn.sendall(make_status_frame(seq, status))
                     while True:
@@ -380,7 +406,8 @@ def serve(args: argparse.Namespace) -> None:
                                                      new.center_hz / 1e6, new.span_hz / 1e6,
                                                      new.sample_rate, new.rf_bandwidth_hz, new.fft_size,
                                                      new.gain_db, new.averages, new.agc, new.fps)
-                                            source.configure(new)
+                                            if mode == 'spectrum':
+                                                source.configure(new)
                                             if (new.center_hz != cfg.center_hz or new.span_hz != cfg.span_hz
                                                     or new.sample_rate != cfg.sample_rate or
                                                     new.fft_size != cfg.fft_size or
@@ -390,7 +417,8 @@ def serve(args: argparse.Namespace) -> None:
                                             hold.fill(-160)
                                             last_wf_emit = 0.0
                                             next_send = time.monotonic()
-                                            status = 'CONFIG APPLIED'
+                                            status = ('CONFIG APPLIED' if mode == 'spectrum'
+                                                      else 'SPECTRUM CONFIG SAVED - ADSB ACTIVE')
                                         elif typ == CMD_WF_RANGE:
                                             if len(frame) != WF_RANGE_SIZE:
                                                 raise ValueError('WF_RANGE frame length mismatch')
@@ -404,13 +432,52 @@ def serve(args: argparse.Namespace) -> None:
                                             waterfall.reset()
                                             last_wf_emit = 0.0
                                             status = 'WATERFALL CLEARED'
+                                        elif typ == CMD_ADSB_START:
+                                            if len(frame) != 6:
+                                                raise ValueError('ADSB_START frame length mismatch')
+                                            if mode != 'adsb':
+                                                was_running = running
+                                                running = False
+                                                source.release()
+                                                try:
+                                                    adsb.start()
+                                                except Exception:
+                                                    source.configure(cfg)
+                                                    running = was_running
+                                                    raise
+                                                mode = 'adsb'
+                                                aircraft_seen_messages.clear()
+                                                adsb_seq = 0
+                                                next_adsb = 0.0
+                                            status = 'ADSB SIMULATED' if args.simulate else 'ADSB STARTING 1090 MHZ'
+                                        elif typ == CMD_ADSB_STOP:
+                                            if len(frame) != 6:
+                                                raise ValueError('ADSB_STOP frame length mismatch')
+                                            if mode == 'adsb':
+                                                adsb.stop()
+                                                mode = 'spectrum'
+                                                source.configure(cfg)
+                                                running = True
+                                                next_send = time.monotonic()
+                                                waterfall.reset()
+                                                hold.fill(-160)
+                                            status = 'SPECTRUM RESTORED'
                                         elif typ == CMD_START:
+                                            if mode == 'adsb':
+                                                adsb.stop()
+                                                mode = 'spectrum'
+                                                source.configure(cfg)
+                                                waterfall.reset()
+                                                hold.fill(-160)
                                             running = True
                                             next_send = time.monotonic()
                                             status = "RUNNING"
                                         elif typ == CMD_STOP:
-                                            running = False
-                                            status = "STOPPED"
+                                            if mode == 'spectrum':
+                                                running = False
+                                                status = "STOPPED"
+                                            else:
+                                                status = 'ADSB ACTIVE - USE RETURN TO SPECTRUM'
                                         elif typ == CMD_CLEAR_HOLD:
                                             hold.fill(-160)
                                             status = "PEAK HOLD CLEARED"
@@ -425,7 +492,47 @@ def serve(args: argparse.Namespace) -> None:
                                     # handles disconnection; do not send again here.
                                     conn.sendall(make_status_frame(seq, status))
                         now = time.monotonic()
-                        if running and now >= next_send:
+                        if mode == 'adsb' and now >= next_adsb:
+                            adsb_seq = (adsb_seq + 1) % (2 ** 32)
+                            try:
+                                snapshot = adsb.snapshot()
+                                if snapshot is None:
+                                    count = 0
+                                    rows = []
+                                    raw_total = 0
+                                    state = 'WAITING FOR ADS-B DATA'
+                                else:
+                                    raw_total = snapshot.get('messages', 0)
+                                    rows = normalize_aircraft(snapshot)
+                                    count = len(rows)
+                                    state = ('SIMULATED AIRCRAFT - NOT LIVE' if args.simulate
+                                             else 'LIVE 1090 MHZ')
+                                    # Send structured aircraft updates. Includes updated
+                                    # aircraft, not just aircraft with positions.
+                                    for row in rows[:30]:
+                                        identity = row['hex']
+                                        messages = row['messages_int']
+                                        if messages > aircraft_seen_messages.get(identity, -1):
+                                            conn.sendall(make_adsb_event(adsb_seq, row))
+                                        aircraft_seen_messages[identity] = messages
+                                    current = set(r['hex'] for r in rows)
+                                    aircraft_seen_messages = {k:v for k,v in aircraft_seen_messages.items()
+                                                              if k in current}
+                                conn.sendall(make_adsb_table(adsb_seq, count, raw_total, state, rows))
+                            except Exception as exc:
+                                LOG.exception('ADS-B decoder/poll failed')
+                                adsb.stop()
+                                mode = 'spectrum'
+                                try:
+                                    source.configure(cfg)
+                                    running = True
+                                except Exception as restore_exc:
+                                    LOG.error('Spectrum restore failed: %s', restore_exc)
+                                    running = False
+                                status = f'ERROR ADSB: {str(exc)[:44]}'
+                                conn.sendall(make_status_frame(seq, status))
+                            next_adsb = time.monotonic() + 1.0
+                        if mode == 'spectrum' and running and now >= next_send:
                             try:
                                 iq = source.receive(cfg)
                                 levels, peak_hz, peak_dbfs, rbw = calculate_spectrum(iq, cfg)
@@ -446,18 +553,27 @@ def serve(args: argparse.Namespace) -> None:
                                 conn.sendall(make_waterfall_frame(cfg, seq, waterfall))
                                 last_wf_emit = time.monotonic()
                             next_send = time.monotonic() + 1 / cfg.fps
-                        elif not running and now - last_status > 2:
+                        elif mode == 'spectrum' and not running and now - last_status > 2:
                             conn.sendall(make_status_frame(seq, status))
                             last_status = now
                 except (ConnectionError, OSError) as exc:
                     LOG.warning("COSMOS disconnected: %s", exc)
                 except Exception:
                     LOG.exception("Bridge fault; waiting for COSMOS reconnection")
+                finally:
+                    if mode == 'adsb':
+                        adsb.stop()
+                        try:
+                            source.configure(cfg)
+                        except Exception:
+                            LOG.exception('Could not restore spectrum on COSMOS disconnect')
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--simulate", action="store_true", help="Synthetic test signals; no hardware")
+    parser.add_argument("--simulate", action="store_true", help="Synthetic FFT and fictional ADS-B data; no hardware")
+    parser.add_argument("--readsb-path", default="readsb", help="readsb executable, compiled with PLUTOSDR=yes")
+    parser.add_argument("--readsb-log", default="/tmp/pluto-cosmos-readsb.log", help="readsb process log")
     parser.add_argument("--uri", default="ip:192.168.2.1", help="Pluto libiio URI")
     parser.add_argument("--listen", default="0.0.0.0", help="Local listener bind IP")
     parser.add_argument("--port", type=int, default=PORT)

@@ -1,7 +1,7 @@
 SCREEN AUTO AUTO 0.25
 VERTICALBOX
   TITLE "PLUTO SDR - SPECTRUM ANALYZER"
-  LABEL "All displayed power is relative dBFS, not calibrated dBm. Receive only."
+  LABEL "Relative dBFS (not calibrated dBm). RX only. Span is a display crop, RF BW controls the analog filter."
   HORIZONTALBOX
     LABEL "Center (MHz)"
     NAMED_WIDGET CENTER TEXTFIELD 10 "915.0"
@@ -9,6 +9,8 @@ VERTICALBOX
     NAMED_WIDGET SPAN TEXTFIELD 8 "1.6"
     LABEL "Sample rate (MSPS)"
     NAMED_WIDGET RATE TEXTFIELD 8 "2.0"
+    LABEL "RF BW (MHz)"
+    NAMED_WIDGET BW TEXTFIELD 8 "1.6"
     LABEL "FFT size"
     NAMED_WIDGET FFT TEXTFIELD 7 "2048"
   END
@@ -23,7 +25,7 @@ VERTICALBOX
     NAMED_WIDGET FPS TEXTFIELD 3 "2"
   END
   HORIZONTALBOX
-    BUTTON "Apply settings" "api.cmd('PLUTO_SDR CONFIG with CENTER_HZ ' + Math.round(parseFloat(screen.getNamedWidget('CENTER').text())*1e6) + ', SPAN_HZ ' + Math.round(parseFloat(screen.getNamedWidget('SPAN').text())*1e6) + ', SAMPLE_RATE ' + Math.round(parseFloat(screen.getNamedWidget('RATE').text())*1e6) + ', FFT_SIZE ' + parseInt(screen.getNamedWidget('FFT').text()) + ', GAIN_DB ' + parseFloat(screen.getNamedWidget('GAIN').text()) + ', AVERAGES ' + parseInt(screen.getNamedWidget('AVG').text()) + ', AGC ' + parseInt(screen.getNamedWidget('AGC').text()) + ', FPS ' + parseInt(screen.getNamedWidget('FPS').text()))"
+    BUTTON "Apply settings" "api.cmd('PLUTO_SDR CONFIG_V2 with CENTER_HZ ' + Math.round(parseFloat(screen.getNamedWidget('CENTER').text())*1e6) + ', SPAN_HZ ' + Math.round(parseFloat(screen.getNamedWidget('SPAN').text())*1e6) + ', SAMPLE_RATE ' + Math.round(parseFloat(screen.getNamedWidget('RATE').text())*1e6) + ', FFT_SIZE ' + parseInt(screen.getNamedWidget('FFT').text()) + ', GAIN_DB ' + parseFloat(screen.getNamedWidget('GAIN').text()) + ', AVERAGES ' + parseInt(screen.getNamedWidget('AVG').text()) + ', AGC ' + parseInt(screen.getNamedWidget('AGC').text()) + ', FPS ' + parseInt(screen.getNamedWidget('FPS').text()) + ', RF_BANDWIDTH_HZ ' + Math.round(parseFloat(screen.getNamedWidget('BW').text())*1e6))"
     BUTTON "Start" "api.cmd('PLUTO_SDR START')"
     BUTTON "Stop" "api.cmd('PLUTO_SDR STOP')"
     BUTTON "Clear Peak Hold" "api.cmd('PLUTO_SDR CLEAR_HOLD')"
@@ -33,6 +35,26 @@ VERTICALBOX
     SETTING ITEM PLUTO_SDR SPECTRUM POWER_DBFS
     SETTING ITEM PLUTO_SDR SPECTRUM HOLD_DBFS
     SETTING SIZE 950 440
+  HORIZONTALBOX
+    LABEL "Waterfall scale min (dBFS)"
+    NAMED_WIDGET WFMIN TEXTFIELD 7 "-115"
+    LABEL "Max (dBFS)"
+    NAMED_WIDGET WFMAX TEXTFIELD 7 "-35"
+    BUTTON "Apply waterfall colors" "api.cmd('PLUTO_SDR WF_RANGE with FLOOR_DBFS ' + parseFloat(screen.getNamedWidget('WFMIN').text()) + ', CEILING_DBFS ' + parseFloat(screen.getNamedWidget('WFMAX').text()))"
+    BUTTON "Clear waterfall" "api.cmd('PLUTO_SDR CLEAR_WF')"
+  END
+  LABEL "WATERFALL - Newest at top. Frequency increases left to right. Bright colors are stronger signals."
+  IMAGEVIEWER PLUTO_SDR WATERFALL PNG_BASE64 png
+  HORIZONTALBOX
+    LABEL "Waterfall left MHz"
+    VALUE PLUTO_SDR WATERFALL LEFT_MHZ
+    LABEL "Center MHz"
+    VALUE PLUTO_SDR WATERFALL CENTER_MHZ
+    LABEL "Right MHz"
+    VALUE PLUTO_SDR WATERFALL RIGHT_MHZ
+    LABEL "History rows"
+    VALUE PLUTO_SDR WATERFALL VALID_ROWS
+  END
   HORIZONTALBOX
     LABEL "Left (MHz)"
     VALUE PLUTO_SDR SPECTRUM LEFT_MHZ

@@ -22,3 +22,37 @@ COMMAND PLUTO_SDR STOP BIG_ENDIAN "Stop spectrum collection"
 COMMAND PLUTO_SDR CLEAR_HOLD BIG_ENDIAN "Clear peak-hold spectrum"
   APPEND_PARAMETER LENGTH 32 UINT 6 6 6 "Total packet bytes"
   APPEND_ID_PARAMETER TYPE 16 UINT 103 103 103 "Clear peak hold"
+
+# V2 CONFIG separates digital display span and analog RF receive filter width.
+# Legacy CONFIG (ID 100) remains accepted by the bridge.
+COMMAND PLUTO_SDR CONFIG_V2 BIG_ENDIAN "Set Pluto display and hardware settings"
+  APPEND_PARAMETER LENGTH 32 UINT 40 40 40 "Total packet bytes"
+  APPEND_ID_PARAMETER TYPE 16 UINT 104 104 104 "Configure V2"
+  APPEND_PARAMETER CENTER_HZ 64 UINT 70000000 6000000000 915000000 "Center Hz"
+  APPEND_PARAMETER SPAN_HZ 32 UINT 50000 20000000 1600000 "Displayed span Hz"
+  APPEND_PARAMETER SAMPLE_RATE 32 UINT 520833 20000000 2000000 "Samples per second"
+  APPEND_PARAMETER FFT_SIZE 32 UINT 256 8192 2048 "FFT length"
+  APPEND_PARAMETER GAIN_DB 32 FLOAT 0 70 40 "Manual gain dB"
+  APPEND_PARAMETER AVERAGES 32 FLOAT 1 32 8 "FFT windows per update"
+  APPEND_PARAMETER AGC 8 UINT 0 1 0 "AGC 0 manual, 1 automatic"
+  APPEND_PARAMETER FPS 8 UINT 1 5 2 "Display FFT frames/second"
+  APPEND_PARAMETER RF_BANDWIDTH_HZ 32 UINT 200000 20000000 1600000 "Hardware RF filter bandwidth Hz"
+
+COMMAND PLUTO_SDR WF_RANGE BIG_ENDIAN "Set waterfall color scale (dBFS)"
+  APPEND_PARAMETER LENGTH 32 UINT 14 14 14 "Total packet bytes"
+  APPEND_ID_PARAMETER TYPE 16 UINT 105 105 105 "Waterfall colors"
+  APPEND_PARAMETER FLOOR_DBFS 32 FLOAT -160 10 -115 "Low end of waterfall scale"
+  APPEND_PARAMETER CEILING_DBFS 32 FLOAT -150 20 -35 "High end of waterfall scale"
+
+COMMAND PLUTO_SDR CLEAR_WF BIG_ENDIAN "Clear waterfall history"
+  APPEND_PARAMETER LENGTH 32 UINT 6 6 6 "Total packet bytes"
+  APPEND_ID_PARAMETER TYPE 16 UINT 106 106 106 "Clear waterfall"
+
+# readsb temporarily takes exclusive ownership of the Pluto RX.
+COMMAND PLUTO_SDR ADSB_START BIG_ENDIAN "Switch receiver to 1090 MHz ADS-B decoding"
+  APPEND_PARAMETER LENGTH 32 UINT 6 6 6 "Total packet bytes"
+  APPEND_ID_PARAMETER TYPE 16 UINT 107 107 107 "Start ADS-B mode"
+
+COMMAND PLUTO_SDR ADSB_STOP BIG_ENDIAN "Stop readsb and restore spectrum mode"
+  APPEND_PARAMETER LENGTH 32 UINT 6 6 6 "Total packet bytes"
+  APPEND_ID_PARAMETER TYPE 16 UINT 108 108 108 "Return to spectrum"
