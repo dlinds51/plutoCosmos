@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import math
 import pathlib
 import shutil
@@ -141,9 +142,17 @@ class ADSBRuntime:
         command = [program, '--device-type', 'plutosdr', '--pluto-network', host,
                    '--write-json', self._tmp.name, '--write-json-every', '1',
                    '--quiet']
+        # readsb's Pluto backend asks libiio for the default context before
+        # consulting --pluto-network. In WSL2 this can select a local context
+        # rather than the USB-network Pluto, causing invalid-device crashes.
+        # Scope this override to readsb; leave the parent bridge unchanged.
+        readsb_env = os.environ.copy()
+        readsb_env['IIOD_REMOTE'] = self.uri
+        LOG.info('readsb libiio default context: IIOD_REMOTE=%s', self.uri)
         try:
             self._proc = subprocess.Popen(command, stdin=subprocess.DEVNULL,
-                                          stdout=self._log_handle, stderr=subprocess.STDOUT)
+                                          stdout=self._log_handle, stderr=subprocess.STDOUT,
+                                          env=readsb_env)
         except Exception:
             self.stop()
             raise
