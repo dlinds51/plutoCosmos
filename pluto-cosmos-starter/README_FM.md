@@ -91,16 +91,14 @@ If no sound, check the bridge's `ERROR` log, the COSMOS `STATUS MESSAGE`, `pactl
 - Real-time WSL2 USB forwarding and WSLg scheduling may still produce audio dropouts on some systems. Start with nearby strong stations and an FM-band antenna.
 - The GUI *does not* play audio itself: audio is played by WSL2/Windows, not the browser.
 
+## WSL2 System Dependencies
 
-## Tests
-
-
-I'd also recommend eventually adding a **`setup_wsl.sh` script** to your repository. That could install Linux dependencies, create the Python virtual environment, install Python requirements, and verify Pluto connectivity and Windows audio support.
-
-That would make it much easier to reproduce your setup on another computer or share the project with someone else.
-
-For now, your audio dependency is installed and verified. **We're ready to try live FM reception in COSMOS!**
+Install required Linux utilities:
 
 ```bash
-python3 -m unittest discover -s tests -v
-```
+sudo apt update
+sudo apt install -y \
+    pulseaudio-utils \
+    libiio-dev \
+    libad9361-dev
+
