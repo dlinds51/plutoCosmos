@@ -16,8 +16,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from adsb import (ADSBRuntime, make_adsb_table, make_adsb_event, normalize_aircraft,
-                  ADSB_TABLE_ID, ADSB_EVENT_ID)
+from adsb import (ADSBRuntime, AircraftMap, make_adsb_table, make_adsb_event, make_adsb_map,
+                  normalize_aircraft, ADSB_TABLE_ID, ADSB_EVENT_ID, ADSB_MAP_ID)
 
 LOG = logging.getLogger("pluto_cosmos")
 PORT = 7350
@@ -25,6 +25,7 @@ BINS = 512
 PKT_SPECTRUM = 1
 PKT_STATUS = 2
 PKT_WATERFALL = 3
+PKT_ADSB_MAP = 6
 CMD_CONFIG = 100
 CMD_START = 101
 CMD_STOP = 102
@@ -374,6 +375,7 @@ def serve(args: argparse.Namespace) -> None:
                 adsb_seq = 0
                 next_adsb = 0.0
                 aircraft_seen_messages = {}
+                adsb_map = AircraftMap()
                 try:
                     conn.sendall(make_status_frame(seq, status))
                     while True:
@@ -447,6 +449,7 @@ def serve(args: argparse.Namespace) -> None:
                                                     raise
                                                 mode = 'adsb'
                                                 aircraft_seen_messages.clear()
+                                                adsb_map.reset()
                                                 adsb_seq = 0
                                                 next_adsb = 0.0
                                             status = 'ADSB SIMULATED' if args.simulate else 'ADSB STARTING 1090 MHZ'
@@ -519,6 +522,7 @@ def serve(args: argparse.Namespace) -> None:
                                     aircraft_seen_messages = {k:v for k,v in aircraft_seen_messages.items()
                                                               if k in current}
                                 conn.sendall(make_adsb_table(adsb_seq, count, raw_total, state, rows))
+                                conn.sendall(make_adsb_map(adsb_seq, adsb_map.update(rows)))
                             except Exception as exc:
                                 LOG.exception('ADS-B decoder/poll failed')
                                 adsb.stop()
