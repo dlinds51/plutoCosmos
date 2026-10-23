@@ -1,0 +1,41 @@
+# Python virtual environments / caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local editor and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs, process crash files, local state
+*.log
+core
+core.*
+*.core
+*.pid
+.env
+.env.*
+!.env.example
+
+# SDR/audio captures and temporary output (avoid giant accidental commits)
+*.iq
+*.cfile
+*.raw
+*.wav
+*.flac
+*.pcm
+*.sigmf-data
+*.sigmf-meta
+
+# Local builds / unpacked artifacts
+build/
+dist/
+*.egg-info/
