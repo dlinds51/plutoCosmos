@@ -1,3 +1,4 @@
 numpy>=1.24,<3
 pylibiio==0.25
 pyadi-iio>=0.0.17
+Pillow>=10,<13
