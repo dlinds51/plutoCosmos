@@ -109,8 +109,11 @@ class FMDemodulator:
 
 class WSLgAudio:
     """Audio sink via PulseAudio 'pacat' (WSLg forwards it to Windows speakers)."""
-    def __init__(self, simulate: bool = False, log_path: str = '/tmp/pluto-cosmos-fm-audio.log'):
+    def __init__(self, simulate: bool = False, log_path: str = '/tmp/pluto-cosmos-fm-audio.log', channels: int = 1):
         self.simulate = simulate
+        if channels not in (1, 2):
+            raise ValueError("Audio output channels must be 1 or 2")
+        self.channels = channels
         self.log_path = log_path
         self.proc = None
         self.log = None
@@ -128,7 +131,7 @@ class WSLgAudio:
         if not env.get('PULSE_SERVER') and os.path.exists('/mnt/wslg/PulseServer'):
             env['PULSE_SERVER'] = 'unix:/mnt/wslg/PulseServer'
         command = [executable, '--playback', '--raw', '--format=s16le',
-                   '--rate=48000', '--channels=1', '--latency-msec=200']
+                   '--rate=48000', f'--channels={self.channels}', '--latency-msec=200']
         self.log = open(self.log_path, 'ab', buffering=0)
         try:
             self.proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
@@ -140,6 +143,8 @@ class WSLgAudio:
 
     def write(self, pcm: np.ndarray):
         pcm = np.asarray(pcm, dtype='<i2')
+        if self.channels == 2 and (pcm.ndim != 2 or pcm.shape[1] != 2):
+            raise ValueError('Expected stereo PCM array of shape (frames, 2)')
         if self.simulate:
             self.samples_written += len(pcm)
             return

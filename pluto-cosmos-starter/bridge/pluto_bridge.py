@@ -20,8 +20,11 @@ from adsb import (ADSBRuntime, AircraftMap, make_adsb_table, make_adsb_event, ma
                   normalize_aircraft, ADSB_TABLE_ID, ADSB_EVENT_ID, ADSB_MAP_ID,
                   DEFAULT_HOME_LAT, DEFAULT_HOME_LON, DEFAULT_LAT_SPAN, DEFAULT_LON_SPAN)
 
-from fm import (FMSettings, FMDemodulator, WSLgAudio, DemoFMSource, make_fm_status,
+from fm import (FMSettings, WSLgAudio, DemoFMSource, make_fm_status,
                 FM_CMD_FMT, FM_CMD_SIZE, FM_SAMPLE_RATE, FM_BUFFER_SAMPLES)
+from fm_stereo import (FMStereoDemodulator, make_audio_spectrum,
+                       make_dsp_status)
+from rds_stream import RDSService, make_rds_status
 
 LOG = logging.getLogger("pluto_cosmos")
 PORT = 7350
@@ -44,6 +47,9 @@ CMD_CLEAR_TRACKS = 110
 CMD_FM_START = 111
 CMD_FM_STOP = 112
 CMD_FM_TUNE = 113
+CMD_FM_OPTIONS = 114
+FM_OPTIONS_FMT = ">IHBB"
+FM_OPTIONS_SIZE = struct.calcsize(FM_OPTIONS_FMT)
 CONFIG_FMT = ">IHQIIIffBB"
 CONFIG_SIZE = struct.calcsize(CONFIG_FMT)  # 36 bytes
 CONFIG_V2_FMT = ">IHQIIIffBBI"  # Existing CONFIG + receive RF bandwidth
@@ -389,8 +395,11 @@ def serve(args: argparse.Namespace) -> None:
                 fm_settings = FMSettings()
                 fm_cfg = None
                 fm_demo = DemoFMSource()
-                fm_demod = FMDemodulator()
-                fm_audio = WSLgAudio(simulate=args.simulate)
+                fm_demod = FMStereoDemodulator()
+                fm_audio = WSLgAudio(simulate=args.simulate, channels=2)
+                fm_rds = RDSService(program=args.redsea_path, simulate=args.simulate)
+                fm_stereo_enabled = True
+                fm_rds_enabled = True
                 fm_seq = 0
                 fm_next_status = 0.0
                 fm_audio_rms = -160.0
@@ -465,6 +474,7 @@ def serve(args: argparse.Namespace) -> None:
                                                 raise ValueError('ADSB_START frame length mismatch')
                                             if mode != 'adsb':
                                                 if mode == 'fm':
+                                                    fm_rds.stop()
                                                     fm_audio.stop()
                                                 was_running = running
                                                 running = False
@@ -528,7 +538,9 @@ def serve(args: argparse.Namespace) -> None:
                                                     if not args.simulate:
                                                         source.configure(desired_cfg)
                                                     fm_audio.start()
+                                                    if fm_rds_enabled: fm_rds.start()
                                                 except Exception:
+                                                    fm_rds.stop()
                                                     fm_audio.stop()
                                                     source.configure(cfg)
                                                     mode = 'spectrum'
@@ -549,15 +561,30 @@ def serve(args: argparse.Namespace) -> None:
                                                     raise
                                                 if settings.frequency_hz != fm_settings.frequency_hz:
                                                     fm_demod.reset()
+                                                    if fm_rds_enabled: fm_rds.start()
                                             fm_settings = settings
                                             fm_cfg = desired_cfg
                                             mode = 'fm'
                                             running = False
                                             status = f'FM TUNED {hz / 1e6:.2f} MHz'
+                                        elif typ == CMD_FM_OPTIONS:
+                                            if len(frame) != FM_OPTIONS_SIZE:
+                                                raise ValueError('FM_OPTIONS command length mismatch')
+                                            _, _, stereo_on, rds_on = struct.unpack(FM_OPTIONS_FMT, frame)
+                                            if stereo_on not in (0,1) or rds_on not in (0,1):
+                                                raise ValueError('Stereo/RDS options must be 0 or 1')
+                                            fm_stereo_enabled = bool(stereo_on)
+                                            old_rds = fm_rds_enabled
+                                            fm_rds_enabled = bool(rds_on)
+                                            if mode == 'fm' and old_rds != fm_rds_enabled:
+                                                if fm_rds_enabled: fm_rds.start()
+                                                else: fm_rds.stop()
+                                            status = f'FM OPTIONS STEREO={stereo_on} RDS={rds_on}'
                                         elif typ == CMD_FM_STOP:
                                             if len(frame) != 6:
                                                 raise ValueError('FM_STOP frame length mismatch')
                                             if mode == 'fm':
+                                                fm_rds.stop()
                                                 fm_audio.stop()
                                                 mode = 'spectrum'
                                                 source.configure(cfg)
@@ -568,6 +595,7 @@ def serve(args: argparse.Namespace) -> None:
                                             status = 'FM STOPPED - SPECTRUM RESTORED'
                                         elif typ == CMD_START:
                                             if mode == 'fm':
+                                                fm_rds.stop()
                                                 fm_audio.stop()
                                                 mode = 'spectrum'
                                                 source.configure(cfg)
@@ -646,18 +674,27 @@ def serve(args: argparse.Namespace) -> None:
                                 iq = (fm_demo.receive() if args.simulate else source.receive(fm_cfg))
                                 if args.simulate:
                                     time.sleep(FM_BUFFER_SAMPLES / FM_SAMPLE_RATE)
-                                pcm, fm_audio_rms, fm_rf_rms = fm_demod.process(iq, fm_settings.volume)
+                                pcm, fm_audio_rms, fm_rf_rms = fm_demod.process(
+                                    iq, fm_settings.volume, stereo=fm_stereo_enabled)
                                 fm_audio.write(pcm)
+                                if fm_rds_enabled: fm_rds.feed(fm_demod.last_mpx)
                                 fm_frames += 1
                                 if time.monotonic() >= fm_next_status:
                                     fm_seq = (fm_seq + 1) % (2 ** 32)
                                     conn.sendall(make_fm_status(fm_seq, fm_settings, fm_audio_rms,
                                          fm_rf_rms, fm_frames,
                                          'SIMULATED FM' if args.simulate else 'FM PLAYING WINDOWS',
-                                         'Mono / 48k / 75us de-emphasis'))
+                                         '48k stereo PCM / pilot auto-fallback / 75us'))
+                                    conn.sendall(make_audio_spectrum(fm_seq,
+                                         fm_demod.last_audio[:,0], fm_demod.last_audio[:,1]))
+                                    conn.sendall(make_dsp_status(fm_seq, fm_stereo_enabled,
+                                         fm_demod.pilot_locked, fm_rds_enabled, fm_rds.running,
+                                         fm_demod.pilot_db))
+                                    conn.sendall(make_rds_status(fm_seq, fm_rds.snapshot()))
                                     fm_next_status = time.monotonic() + 1.0
                             except Exception as exc:
                                 LOG.exception('FM receive or audio failed')
+                                fm_rds.stop()
                                 fm_audio.stop()
                                 mode = 'spectrum'
                                 try:
@@ -698,6 +735,7 @@ def serve(args: argparse.Namespace) -> None:
                     LOG.exception("Bridge fault; waiting for COSMOS reconnection")
                 finally:
                     if mode == 'fm':
+                        fm_rds.stop()
                         fm_audio.stop()
                         try:
                             source.configure(cfg)
@@ -717,6 +755,7 @@ def main() -> None:
     parser.add_argument("--fm-allow-extended", action="store_true", help="Allow broadcast FM (88-108 MHz) on frequency-extended Pluto")
     parser.add_argument("--readsb-path", default="readsb", help="readsb executable, compiled with PLUTOSDR=yes")
     parser.add_argument("--readsb-log", default="/tmp/pluto-cosmos-readsb.log", help="readsb process log")
+    parser.add_argument("--redsea-path", default="redsea", help="Optional redsea executable for RDS; FM audio works without it")
     parser.add_argument("--uri", default="ip:192.168.2.1", help="Pluto libiio URI")
     parser.add_argument("--listen", default="0.0.0.0", help="Local listener bind IP")
     parser.add_argument("--port", type=int, default=PORT)
