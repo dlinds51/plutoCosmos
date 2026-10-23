@@ -213,6 +213,13 @@ python3 -m unittest discover -s tests -v
 - ADSB_EVENT telemetry ID 5 is a fixed length packet: length, type, seq, one aircraft row. Field widths and `APPEND_ITEM` layouts are defined in `bridge/adsb.py` and COSMOS `targets/PLUTO_SDR/cmd_tlm/tlm.txt`.
 - Original COSMOS `SPECTRUM` screen and its waterfall are preserved. ADS-B is **receive only**. COSMOS receives decoded telemetry, not high-rate raw I/Q.
 
-## Roadmap
+## WSL2 System Dependencies
 
-The next additions could be optional antenna configuration, logging/CSV export, aircraft position map within COSMOS, and FM demodulation (subject to Pluto's verified hardware receive band). The spectrum bridge still uses the previously validated retune and sample-rate reconfiguration path.
+Install required Linux utilities:
+
+```bash
+sudo apt update
+sudo apt install -y \
+    pulseaudio-utils \
+    libiio-dev \
+    libad9361-dev
