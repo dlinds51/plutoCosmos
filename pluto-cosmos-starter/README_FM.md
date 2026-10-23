@@ -90,7 +90,7 @@ If no sound, check the bridge's `ERROR` log, the COSMOS `STATUS MESSAGE`, `pactl
 - Continuous WSLg PulseAudio playback with `pacat --raw --format=s16le --rate=48000 --channels=1`.
 - Real-time WSL2 USB forwarding and WSLg scheduling may still produce audio dropouts on some systems. Start with nearby strong stations and an FM-band antenna.
 - The GUI *does not* play audio itself: audio is played by WSL2/Windows, not the browser.
-- Hardware FM reception and speaker audio have **not been validated against your actual Pluto/Windows machine**. The test suite uses simulated I/Q and an audio stub, so real hardware validation is still required.
+
 
 ## Tests
 
