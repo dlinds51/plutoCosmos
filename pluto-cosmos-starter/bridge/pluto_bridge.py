@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
 import math
+import zlib
 import select
 import socket
 import struct
@@ -18,12 +20,23 @@ PORT = 7350
 BINS = 512
 PKT_SPECTRUM = 1
 PKT_STATUS = 2
+PKT_WATERFALL = 3
 CMD_CONFIG = 100
 CMD_START = 101
 CMD_STOP = 102
 CMD_CLEAR_HOLD = 103
+CMD_CONFIG_V2 = 104
+CMD_WF_RANGE = 105
+CMD_CLEAR_WF = 106
 CONFIG_FMT = ">IHQIIIffBB"
 CONFIG_SIZE = struct.calcsize(CONFIG_FMT)  # 36 bytes
+CONFIG_V2_FMT = ">IHQIIIffBBI"  # Existing CONFIG + receive RF bandwidth
+CONFIG_V2_SIZE = struct.calcsize(CONFIG_V2_FMT)  # 40 bytes
+WF_RANGE_FMT = ">IHff"
+WF_RANGE_SIZE = struct.calcsize(WF_RANGE_FMT)  # 14 bytes
+WATERFALL_FMT = ">IHI6fI"  # length/id/seq, left/center/right/floor/ceiling/row seconds, valid rows
+WF_BINS = 256
+WF_ROWS = 96
 SPECTRUM_FMT = ">IHI5fI4f"
 SPECTRUM_SIZE = struct.calcsize(SPECTRUM_FMT) + 2 * BINS * 4
 MAX_FRAME = 16384
@@ -39,6 +52,7 @@ class Config:
     averages: int = 8
     agc: int = 0
     fps: int = 2
+    rf_bandwidth_hz: int = 1_600_000  # independent of zoom/display span
 
     def validate(self, fmin: float, fmax: float) -> None:
         if not fmin * 1e6 <= self.center_hz <= fmax * 1e6:
@@ -47,6 +61,8 @@ class Config:
             raise ValueError("Sample rate must be 520833–20000000 SPS")
         if not 50_000 <= self.span_hz <= self.sample_rate:
             raise ValueError("Span must be 50 kHz through sample rate")
+        if not 200_000 <= self.rf_bandwidth_hz <= self.sample_rate:
+            raise ValueError("RF filter bandwidth must be 200 kHz through sample rate")
         if self.fft_size not in (256, 512, 1024, 2048, 4096, 8192):
             raise ValueError("FFT must be 256/512/1024/2048/4096/8192")
         if not 0 <= self.gain_db <= 70 or not math.isfinite(self.gain_db):
@@ -91,10 +107,9 @@ class InputSource:
         if rate_change:
             LOG.info("SDR: sample_rate=%d", cfg.sample_rate)
             d.sample_rate = int(cfg.sample_rate)
-        # The analog filter is an independent RF setting; display span itself
-        # is used in DSP and does not always require retuning hardware.
-        target_bw = min(cfg.sample_rate, max(200_000, cfg.span_hz))
-        old_bw = min(old.sample_rate, max(200_000, old.span_hz)) if old else None
+        # Analog RF bandwidth is independent of displayed/zoomed span.
+        target_bw = cfg.rf_bandwidth_hz
+        old_bw = old.rf_bandwidth_hz if old else None
         if old is None or old_bw != target_bw:
             LOG.info("SDR: rx_rf_bandwidth=%d", target_bw)
             d.rx_rf_bandwidth = int(target_bw)
@@ -206,6 +221,89 @@ def make_status_frame(seq: int, message: str) -> bytes:
     return struct.pack(">IHI64s", 74, PKT_STATUS, seq, payload)
 
 
+def _png_chunk(tag: bytes, data: bytes) -> bytes:
+    payload = tag + data
+    return struct.pack(">I", len(data)) + payload + struct.pack(">I", zlib.crc32(payload) & 0xffffffff)
+
+
+def _waterfall_palette() -> bytes:
+    # perceptually ordered-ish palette: dark navy -> blue -> cyan -> amber -> white
+    stops = ((0, (4, 8, 24)), (48, (10, 26, 86)),
+             (110, (20, 93, 178)), (170, (30, 204, 196)),
+             (218, (245, 178, 52)), (255, (255, 250, 210)))
+    result = bytearray()
+    for i in range(256):
+        for j in range(1, len(stops)):
+            if i <= stops[j][0]:
+                x0, rgb0 = stops[j-1]
+                x1, rgb1 = stops[j]
+                t = (i - x0) / (x1 - x0)
+                result.extend(int(a + (b - a) * t + 0.5) for a, b in zip(rgb0, rgb1))
+                break
+    return bytes(result)
+
+
+WF_PALETTE = _waterfall_palette()
+
+
+class WaterfallHistory:
+    """Small rolling relative-power spectrogram encoded for native IMAGEVIEWER."""
+    def __init__(self, rows: int = WF_ROWS):
+        self.rows = rows
+        self.power = np.full((rows, WF_BINS), -160.0, dtype=np.float32)
+        self.valid = 0
+        self.floor_dbfs = -115.0
+        self.ceiling_dbfs = -35.0
+
+    def reset(self):
+        self.power.fill(-160.0)
+        self.valid = 0
+
+    def set_range(self, floor: float, ceiling: float):
+        if not (math.isfinite(floor) and math.isfinite(ceiling)
+                and -160 <= floor < ceiling <= 20 and ceiling - floor >= 10):
+            raise ValueError('Waterfall floor/ceiling invalid (-160..20 dBFS, >=10 dB apart)')
+        self.floor_dbfs = float(floor)
+        self.ceiling_dbfs = float(ceiling)
+
+    def add(self, levels: np.ndarray):
+        if len(levels) != BINS:
+            raise ValueError(f'Expected {BINS} FFT bins')
+        # Max pool adjacent FFT display bins; this preserves narrow bursts.
+        row = np.asarray(levels, dtype=np.float32).reshape(WF_BINS, 2).max(axis=1)
+        self.power[1:] = self.power[:-1].copy()
+        self.power[0] = row
+        self.valid = min(self.valid + 1, self.rows)
+
+    def png(self) -> bytes:
+        # Indexed-color PNG, standard library only. Scale 256x96 -> 768x192.
+        scaled = np.clip(np.rint((self.power - self.floor_dbfs) *
+                     (255.0 / (self.ceiling_dbfs - self.floor_dbfs))), 0, 255).astype(np.uint8)
+        scaled = np.repeat(np.repeat(scaled, 3, axis=1), 2, axis=0)
+        height, width = scaled.shape
+        # Filter 0 for each PNG scanline; zlib handles repeat runs efficiently.
+        raw = b''.join(b'\x00' + scaled[i].tobytes() for i in range(height))
+        png = bytearray(b'\x89PNG\r\n\x1a\n')
+        png.extend(_png_chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 3, 0, 0, 0)))
+        png.extend(_png_chunk(b'PLTE', WF_PALETTE))
+        png.extend(_png_chunk(b'IDAT', zlib.compress(raw, level=5)))
+        png.extend(_png_chunk(b'IEND', b''))
+        return bytes(png)
+
+
+def make_waterfall_frame(cfg: Config, seq: int, waterfall: WaterfallHistory) -> bytes:
+    image = base64.b64encode(waterfall.png())
+    # COSMOS APPEND_ITEM PNG_BASE64 0 STRING reads the variable-length suffix.
+    total = struct.calcsize(WATERFALL_FMT) + len(image)
+    head = struct.pack(WATERFALL_FMT, total, PKT_WATERFALL, seq,
+                       (cfg.center_hz - cfg.span_hz / 2) / 1e6,
+                       cfg.center_hz / 1e6,
+                       (cfg.center_hz + cfg.span_hz / 2) / 1e6,
+                       waterfall.floor_dbfs, waterfall.ceiling_dbfs,
+                       1.0 / cfg.fps, waterfall.valid)
+    return head + image
+
+
 def decode_frames(buffer: bytearray) -> list[tuple[int, bytes]]:
     result = []
     while len(buffer) >= 4:
@@ -245,6 +343,8 @@ def serve(args: argparse.Namespace) -> None:
                 seq = 0
                 running = True
                 hold = np.full(BINS, -160, dtype=np.float32)
+                waterfall = WaterfallHistory()
+                last_wf_emit = 0.0
                 next_send = time.monotonic()
                 last_status = 0.0
                 status = "SIMULATION" if args.simulate else "PLUTO CONNECTED"
@@ -261,23 +361,49 @@ def serve(args: argparse.Namespace) -> None:
                                 input_buffer.extend(chunk)
                                 for typ, frame in decode_frames(input_buffer):
                                     try:
-                                        if typ == CMD_CONFIG:
-                                            if len(frame) != CONFIG_SIZE:
-                                                raise ValueError("CONFIG frame length mismatch")
-                                            (length, _, hz, span, sps, fft, gain, avg,
-                                             agc, fps) = struct.unpack(CONFIG_FMT, frame)
-                                            new = Config(hz, span, sps, fft, gain, int(avg), agc, fps)
+                                        if typ in (CMD_CONFIG, CMD_CONFIG_V2):
+                                            if typ == CMD_CONFIG_V2:
+                                                if len(frame) != CONFIG_V2_SIZE:
+                                                    raise ValueError('CONFIG_V2 frame length mismatch')
+                                                (length, _, hz, span, sps, fft, gain, avg, agc,
+                                                 fps, rx_bw) = struct.unpack(CONFIG_V2_FMT, frame)
+                                            else:
+                                                if len(frame) != CONFIG_SIZE:
+                                                    raise ValueError('CONFIG frame length mismatch')
+                                                (length, _, hz, span, sps, fft, gain, avg,
+                                                 agc, fps) = struct.unpack(CONFIG_FMT, frame)
+                                                rx_bw = min(cfg.rf_bandwidth_hz, sps)
+                                            new = Config(hz, span, sps, fft, gain, int(avg), agc, fps, rx_bw)
                                             new.validate(args.min_rf_mhz, args.max_rf_mhz)
-                                            LOG.info("CONFIG received: center=%.6f MHz, span=%.3f MHz, "
-                                                     "sps=%d, fft=%d, gain=%.1f, avg=%d, agc=%d, fps=%d",
+                                            LOG.info('CONFIG received: center=%.6f MHz, span=%.3f MHz, '
+                                                     'sps=%d, rx_bw=%d, fft=%d, gain=%.1f, avg=%d, agc=%d, fps=%d',
                                                      new.center_hz / 1e6, new.span_hz / 1e6,
-                                                     new.sample_rate, new.fft_size,
+                                                     new.sample_rate, new.rf_bandwidth_hz, new.fft_size,
                                                      new.gain_db, new.averages, new.agc, new.fps)
                                             source.configure(new)
+                                            if (new.center_hz != cfg.center_hz or new.span_hz != cfg.span_hz
+                                                    or new.sample_rate != cfg.sample_rate or
+                                                    new.fft_size != cfg.fft_size or
+                                                    new.rf_bandwidth_hz != cfg.rf_bandwidth_hz):
+                                                waterfall.reset()
                                             cfg = new
                                             hold.fill(-160)
+                                            last_wf_emit = 0.0
                                             next_send = time.monotonic()
-                                            status = "CONFIG APPLIED"
+                                            status = 'CONFIG APPLIED'
+                                        elif typ == CMD_WF_RANGE:
+                                            if len(frame) != WF_RANGE_SIZE:
+                                                raise ValueError('WF_RANGE frame length mismatch')
+                                            _, _, floor, ceiling = struct.unpack(WF_RANGE_FMT, frame)
+                                            waterfall.set_range(floor, ceiling)
+                                            last_wf_emit = 0.0
+                                            status = 'WATERFALL RANGE APPLIED'
+                                        elif typ == CMD_CLEAR_WF:
+                                            if len(frame) != 6:
+                                                raise ValueError('CLEAR_WF frame length mismatch')
+                                            waterfall.reset()
+                                            last_wf_emit = 0.0
+                                            status = 'WATERFALL CLEARED'
                                         elif typ == CMD_START:
                                             running = True
                                             next_send = time.monotonic()
@@ -311,9 +437,14 @@ def serve(args: argparse.Namespace) -> None:
                                 last_status = time.monotonic()
                                 continue
                             hold = np.maximum(hold, levels)
+                            waterfall.add(levels)
                             seq = (seq + 1) % (2 ** 32)
                             conn.sendall(make_spectrum_frame(cfg, seq, levels, hold,
                                                              peak_hz, peak_dbfs, rbw))
+                            # Cap PNG telemetry to ~1 packet/sec even at 5 FFT/s.
+                            if time.monotonic() - last_wf_emit >= 1.0:
+                                conn.sendall(make_waterfall_frame(cfg, seq, waterfall))
+                                last_wf_emit = time.monotonic()
                             next_send = time.monotonic() + 1 / cfg.fps
                         elif not running and now - last_status > 2:
                             conn.sendall(make_status_frame(seq, status))
