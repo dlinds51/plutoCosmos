@@ -64,32 +64,89 @@ class InputSource:
         self.simulated = simulated
         self.uri = uri
         self.dev = None
+        self.applied: Config | None = None
         self.phase = 0
         self.rng = np.random.default_rng(12345)
 
-    def configure(self, cfg: Config) -> None:
-        if self.simulated:
-            return
-        # Import only in hardware mode so --simulate works without libiio/pyadi-iio.
-        if self.dev is None:
-            import adi  # type: ignore
+    def _apply_hardware(self, cfg: Config) -> None:
+        # Do not churn the RX DMA buffer / sample-rate filter just to retune.
+        # Refreshing all attributes on every CONFIG was unnecessarily disruptive.
+        import adi  # type: ignore
+        new_device = self.dev is None
+        if new_device:
             self.dev = adi.Pluto(uri=self.uri)
         d = self.dev
-        d.rx_destroy_buffer()  # necessary when changing buffer sizes between acquisitions
-        d.sample_rate = cfg.sample_rate
-        d.rx_rf_bandwidth = min(cfg.sample_rate, max(200_000, cfg.span_hz))
-        d.rx_lo = cfg.center_hz
-        d.rx_enabled_channels = [0]
-        d.gain_control_mode_chan0 = "slow_attack" if cfg.agc else "manual"
-        if not cfg.agc:
-            d.rx_hardwaregain_chan0 = cfg.gain_db
-        d.rx_buffer_size = cfg.fft_size * cfg.averages
-        # First buffer after retuning can contain stale samples.
-        d.rx()
+        old = self.applied if not new_device else None
+
+        new_buffer_samples = cfg.fft_size * cfg.averages
+        old_buffer_samples = old.fft_size * old.averages if old else None
+        buffer_change = old is None or old_buffer_samples != new_buffer_samples
+        rate_change = old is None or old.sample_rate != cfg.sample_rate
+        # Changing the capture rate or buffer size needs DMA-buffer recreation.
+        if buffer_change or rate_change:
+            LOG.info("SDR: restarting RX buffer (samples=%d, rate=%d)",
+                     new_buffer_samples, cfg.sample_rate)
+            d.rx_destroy_buffer()
+
+        if rate_change:
+            LOG.info("SDR: sample_rate=%d", cfg.sample_rate)
+            d.sample_rate = int(cfg.sample_rate)
+        # The analog filter is an independent RF setting; display span itself
+        # is used in DSP and does not always require retuning hardware.
+        target_bw = min(cfg.sample_rate, max(200_000, cfg.span_hz))
+        old_bw = min(old.sample_rate, max(200_000, old.span_hz)) if old else None
+        if old is None or old_bw != target_bw:
+            LOG.info("SDR: rx_rf_bandwidth=%d", target_bw)
+            d.rx_rf_bandwidth = int(target_bw)
+        if old is None or old.center_hz != cfg.center_hz:
+            LOG.info("SDR: rx_lo=%d", cfg.center_hz)
+            d.rx_lo = int(cfg.center_hz)
+        if old is None:
+            d.rx_enabled_channels = [0]
+        if old is None or old.agc != cfg.agc:
+            LOG.info("SDR: AGC=%d", cfg.agc)
+            d.gain_control_mode_chan0 = "slow_attack" if cfg.agc else "manual"
+        if not cfg.agc and (old is None or old.agc or old.gain_db != cfg.gain_db):
+            LOG.info("SDR: gain=%g dB", cfg.gain_db)
+            d.rx_hardwaregain_chan0 = float(cfg.gain_db)
+        if buffer_change or rate_change:
+            d.rx_buffer_size = int(new_buffer_samples)
+
+        # Mark active only if *all* device changes have succeeded.
+        self.applied = cfg
+        # A single subsequent discard clears samples acquired before retuning.
+        self.discard_next = (old is None or old.center_hz != cfg.center_hz or
+                             buffer_change or rate_change)
+
+    def configure(self, cfg: Config) -> None:
+        if self.simulated:
+            self.applied = cfg
+            return
+        try:
+            self._apply_hardware(cfg)
+        except (OSError, ConnectionError) as exc:
+            # libiio's persistent socket can become invalid following a reset
+            # (e.g. -104 / ECONNRESET). Reconstruct the IIO context once.
+            LOG.warning("SDR libiio failure: %s; reopening Pluto context once", exc)
+            self.dev = None
+            self.applied = None
+            self._apply_hardware(cfg)
 
     def receive(self, cfg: Config) -> np.ndarray:
         if not self.simulated:
-            return np.asarray(self.dev.rx(), dtype=np.complex64)
+            try:
+                if getattr(self, "discard_next", False):
+                    self.dev.rx()  # discard samples from the previous tuning
+                    self.discard_next = False
+                return np.asarray(self.dev.rx(), dtype=np.complex64)
+            except (OSError, ConnectionError) as exc:
+                LOG.warning("SDR receive error: %s; reconnecting once", exc)
+                self.dev = None
+                self.applied = None
+                self._apply_hardware(cfg)
+                self.dev.rx()  # discard first capture after reconnect
+                self.discard_next = False
+                return np.asarray(self.dev.rx(), dtype=np.complex64)
         n = cfg.fft_size * cfg.averages
         # Two local test signals at +125 kHz and -300 kHz relative to center.
         idx = np.arange(n, dtype=np.float64)
@@ -181,7 +238,9 @@ def serve(args: argparse.Namespace) -> None:
             conn, addr = listener.accept()
             LOG.info("COSMOS connected from %s", addr)
             with conn:
-                conn.setblocking(False)
+                # Use a finite timeout on blocking writes. sendall() on a
+                # nonblocking socket can fail spuriously with EAGAIN.
+                conn.settimeout(5.0)
                 input_buffer = bytearray()
                 seq = 0
                 running = True
@@ -195,10 +254,7 @@ def serve(args: argparse.Namespace) -> None:
                         now = time.monotonic()
                         readable, _, _ = select.select([conn], [], [], (max(0, min(0.1, next_send - now)) if running else 0.1))
                         if readable:
-                            try:
-                                chunk = conn.recv(65536)
-                            except BlockingIOError:
-                                chunk = None
+                            chunk = conn.recv(65536)
                             if chunk == b"":
                                 break
                             if chunk:
@@ -212,6 +268,11 @@ def serve(args: argparse.Namespace) -> None:
                                              agc, fps) = struct.unpack(CONFIG_FMT, frame)
                                             new = Config(hz, span, sps, fft, gain, int(avg), agc, fps)
                                             new.validate(args.min_rf_mhz, args.max_rf_mhz)
+                                            LOG.info("CONFIG received: center=%.6f MHz, span=%.3f MHz, "
+                                                     "sps=%d, fft=%d, gain=%.1f, avg=%d, agc=%d, fps=%d",
+                                                     new.center_hz / 1e6, new.span_hz / 1e6,
+                                                     new.sample_rate, new.fft_size,
+                                                     new.gain_db, new.averages, new.agc, new.fps)
                                             source.configure(new)
                                             cfg = new
                                             hold.fill(-160)
@@ -230,14 +291,25 @@ def serve(args: argparse.Namespace) -> None:
                                         else:
                                             raise ValueError(f"Unknown command ID {typ}")
                                         LOG.info("%s", status)
-                                        conn.sendall(make_status_frame(seq, status))
                                     except Exception as exc:
-                                        LOG.warning("Command failed: %s", exc)
-                                        conn.sendall(make_status_frame(seq, f"ERROR: {exc}"))
+                                        LOG.exception("Command processing failed (type=%s)", typ)
+                                        status = f"ERROR: {exc}"
+                                    # Keep socket errors separate from command errors.
+                                    # On a dead COSMOS socket, only the outer loop
+                                    # handles disconnection; do not send again here.
+                                    conn.sendall(make_status_frame(seq, status))
                         now = time.monotonic()
                         if running and now >= next_send:
-                            iq = source.receive(cfg)
-                            levels, peak_hz, peak_dbfs, rbw = calculate_spectrum(iq, cfg)
+                            try:
+                                iq = source.receive(cfg)
+                                levels, peak_hz, peak_dbfs, rbw = calculate_spectrum(iq, cfg)
+                            except Exception as exc:
+                                LOG.exception("SDR spectrum acquisition failed; pausing stream")
+                                running = False
+                                status = f"ERROR: SDR receive: {exc}"
+                                conn.sendall(make_status_frame(seq, status))
+                                last_status = time.monotonic()
+                                continue
                             hold = np.maximum(hold, levels)
                             seq = (seq + 1) % (2 ** 32)
                             conn.sendall(make_spectrum_frame(cfg, seq, levels, hold,
