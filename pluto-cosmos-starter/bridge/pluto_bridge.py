@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PLUTO_SDR ↔ OpenC3 COSMOS spectrum and ADS-B bridge (receive-only)."""
+"""PLUTO_SDR ↔ OpenC3 COSMOS spectrum, ADS-B and FM bridge (receive-only)."""
 from __future__ import annotations
 
 import argparse
@@ -20,6 +20,9 @@ from adsb import (ADSBRuntime, AircraftMap, make_adsb_table, make_adsb_event, ma
                   normalize_aircraft, ADSB_TABLE_ID, ADSB_EVENT_ID, ADSB_MAP_ID,
                   DEFAULT_HOME_LAT, DEFAULT_HOME_LON, DEFAULT_LAT_SPAN, DEFAULT_LON_SPAN)
 
+from fm import (FMSettings, FMDemodulator, WSLgAudio, DemoFMSource, make_fm_status,
+                FM_CMD_FMT, FM_CMD_SIZE, FM_SAMPLE_RATE, FM_BUFFER_SAMPLES)
+
 LOG = logging.getLogger("pluto_cosmos")
 PORT = 7350
 BINS = 512
@@ -38,12 +41,17 @@ CMD_ADSB_START = 107
 CMD_ADSB_STOP = 108
 CMD_MAP_CFG = 109
 CMD_CLEAR_TRACKS = 110
+CMD_FM_START = 111
+CMD_FM_STOP = 112
+CMD_FM_TUNE = 113
 CONFIG_FMT = ">IHQIIIffBB"
 CONFIG_SIZE = struct.calcsize(CONFIG_FMT)  # 36 bytes
 CONFIG_V2_FMT = ">IHQIIIffBBI"  # Existing CONFIG + receive RF bandwidth
 CONFIG_V2_SIZE = struct.calcsize(CONFIG_V2_FMT)  # 40 bytes
 WF_RANGE_FMT = ">IHff"
 WF_RANGE_SIZE = struct.calcsize(WF_RANGE_FMT)  # 14 bytes
+MAP_CFG_FMT = ">IHffff"
+MAP_CFG_SIZE = struct.calcsize(MAP_CFG_FMT)
 WATERFALL_FMT = ">IHI6fI"  # length/id/seq, left/center/right/floor/ceiling/row seconds, valid rows
 WF_BINS = 256
 WF_ROWS = 96
@@ -378,13 +386,27 @@ def serve(args: argparse.Namespace) -> None:
                 adsb_seq = 0
                 next_adsb = 0.0
                 aircraft_seen_messages = {}
+                fm_settings = FMSettings()
+                fm_cfg = None
+                fm_demo = DemoFMSource()
+                fm_demod = FMDemodulator()
+                fm_audio = WSLgAudio(simulate=args.simulate)
+                fm_seq = 0
+                fm_next_status = 0.0
+                fm_audio_rms = -160.0
+                fm_rf_rms = -160.0
+                fm_frames = 0
                 adsb_map = AircraftMap(home_lat=DEFAULT_HOME_LAT, home_lon=DEFAULT_HOME_LON,
                                       lat_span=DEFAULT_LAT_SPAN, lon_span=DEFAULT_LON_SPAN)
                 try:
                     conn.sendall(make_status_frame(seq, status))
                     while True:
                         now = time.monotonic()
-                        readable, _, _ = select.select([conn], [], [], (max(0, min(0.1, next_send - now)) if running else 0.1))
+                        # FM must stream PCM continuously: never insert 100ms idle gaps
+                        # between successive 109ms I/Q buffers.
+                        timeout = (0.0 if mode == 'fm' else
+                                   max(0, min(0.1, next_send - now)) if running else 0.1)
+                        readable, _, _ = select.select([conn], [], [], timeout)
                         if readable:
                             chunk = conn.recv(65536)
                             if chunk == b"":
@@ -424,7 +446,7 @@ def serve(args: argparse.Namespace) -> None:
                                             last_wf_emit = 0.0
                                             next_send = time.monotonic()
                                             status = ('CONFIG APPLIED' if mode == 'spectrum'
-                                                      else 'SPECTRUM CONFIG SAVED - ADSB ACTIVE')
+                                                      else 'SPECTRUM CONFIG SAVED - OTHER MODE ACTIVE')
                                         elif typ == CMD_WF_RANGE:
                                             if len(frame) != WF_RANGE_SIZE:
                                                 raise ValueError('WF_RANGE frame length mismatch')
@@ -442,14 +464,17 @@ def serve(args: argparse.Namespace) -> None:
                                             if len(frame) != 6:
                                                 raise ValueError('ADSB_START frame length mismatch')
                                             if mode != 'adsb':
+                                                if mode == 'fm':
+                                                    fm_audio.stop()
                                                 was_running = running
                                                 running = False
                                                 source.release()
                                                 try:
                                                     adsb.start()
                                                 except Exception:
+                                                    mode = 'spectrum'
                                                     source.configure(cfg)
-                                                    running = was_running
+                                                    running = True
                                                     raise
                                                 mode = 'adsb'
                                                 aircraft_seen_messages.clear()
@@ -480,7 +505,72 @@ def serve(args: argparse.Namespace) -> None:
                                                 raise ValueError('CLEAR_TRACKS frame length mismatch')
                                             adsb_map.clear_tracks()
                                             status = 'TRACKS CLEARED'
+                                        elif typ in (CMD_FM_START, CMD_FM_TUNE):
+                                            if len(frame) != FM_CMD_SIZE:
+                                                raise ValueError('FM command length mismatch')
+                                            _, _, hz, volume, gain, agc = struct.unpack(FM_CMD_FMT, frame)
+                                            settings = FMSettings(hz, volume, gain, agc)
+                                            settings.validate()
+                                            if not args.fm_allow_extended and not args.simulate:
+                                                raise ValueError('FM requires extended Pluto tuning; add --fm-allow-extended after verifying hardware')
+                                            # Keep a known-good spectrum config and swap to an
+                                            # FM-appropriate capture rate/buffer only during FM.
+                                            desired_cfg = Config(center_hz=settings.frequency_hz,
+                                                span_hz=500_000, sample_rate=FM_SAMPLE_RATE,
+                                                fft_size=4096, gain_db=settings.gain_db,
+                                                averages=32, agc=settings.agc, fps=2,
+                                                rf_bandwidth_hz=1_000_000)
+                                            if mode == 'adsb':
+                                                adsb.stop()
+                                                mode = 'spectrum'
+                                            if mode != 'fm':
+                                                try:
+                                                    if not args.simulate:
+                                                        source.configure(desired_cfg)
+                                                    fm_audio.start()
+                                                except Exception:
+                                                    fm_audio.stop()
+                                                    source.configure(cfg)
+                                                    mode = 'spectrum'
+                                                    running = True
+                                                    raise
+                                                fm_demod.reset()
+                                                fm_frames = 0
+                                                fm_next_status = 0.0
+                                            elif fm_cfg is None or (settings.frequency_hz != fm_settings.frequency_hz
+                                                     or settings.gain_db != fm_settings.gain_db
+                                                     or settings.agc != fm_settings.agc):
+                                                try:
+                                                    if not args.simulate:
+                                                        source.configure(desired_cfg)
+                                                except Exception:
+                                                    if fm_cfg is not None:
+                                                        source.configure(fm_cfg)
+                                                    raise
+                                                if settings.frequency_hz != fm_settings.frequency_hz:
+                                                    fm_demod.reset()
+                                            fm_settings = settings
+                                            fm_cfg = desired_cfg
+                                            mode = 'fm'
+                                            running = False
+                                            status = f'FM TUNED {hz / 1e6:.2f} MHz'
+                                        elif typ == CMD_FM_STOP:
+                                            if len(frame) != 6:
+                                                raise ValueError('FM_STOP frame length mismatch')
+                                            if mode == 'fm':
+                                                fm_audio.stop()
+                                                mode = 'spectrum'
+                                                source.configure(cfg)
+                                                running = True
+                                                next_send = time.monotonic()
+                                                waterfall.reset()
+                                                hold.fill(-160)
+                                            status = 'FM STOPPED - SPECTRUM RESTORED'
                                         elif typ == CMD_START:
+                                            if mode == 'fm':
+                                                fm_audio.stop()
+                                                mode = 'spectrum'
+                                                source.configure(cfg)
                                             if mode == 'adsb':
                                                 adsb.stop()
                                                 mode = 'spectrum'
@@ -495,7 +585,7 @@ def serve(args: argparse.Namespace) -> None:
                                                 running = False
                                                 status = "STOPPED"
                                             else:
-                                                status = 'ADSB ACTIVE - USE RETURN TO SPECTRUM'
+                                                status = 'OTHER MODE ACTIVE - USE STOP FM / RETURN'
                                         elif typ == CMD_CLEAR_HOLD:
                                             hold.fill(-160)
                                             status = "PEAK HOLD CLEARED"
@@ -551,6 +641,33 @@ def serve(args: argparse.Namespace) -> None:
                                 status = f'ERROR ADSB: {str(exc)[:44]}'
                                 conn.sendall(make_status_frame(seq, status))
                             next_adsb = time.monotonic() + 1.0
+                        if mode == 'fm':
+                            try:
+                                iq = (fm_demo.receive() if args.simulate else source.receive(fm_cfg))
+                                if args.simulate:
+                                    time.sleep(FM_BUFFER_SAMPLES / FM_SAMPLE_RATE)
+                                pcm, fm_audio_rms, fm_rf_rms = fm_demod.process(iq, fm_settings.volume)
+                                fm_audio.write(pcm)
+                                fm_frames += 1
+                                if time.monotonic() >= fm_next_status:
+                                    fm_seq = (fm_seq + 1) % (2 ** 32)
+                                    conn.sendall(make_fm_status(fm_seq, fm_settings, fm_audio_rms,
+                                         fm_rf_rms, fm_frames,
+                                         'SIMULATED FM' if args.simulate else 'FM PLAYING WINDOWS',
+                                         'Mono / 48k / 75us de-emphasis'))
+                                    fm_next_status = time.monotonic() + 1.0
+                            except Exception as exc:
+                                LOG.exception('FM receive or audio failed')
+                                fm_audio.stop()
+                                mode = 'spectrum'
+                                try:
+                                    source.configure(cfg)
+                                    running = True
+                                except Exception:
+                                    LOG.exception('Could not restore spectrum after FM error')
+                                    running = False
+                                status = f'FM ERROR: {str(exc)[:49]}'
+                                conn.sendall(make_status_frame(seq, status))
                         if mode == 'spectrum' and running and now >= next_send:
                             try:
                                 iq = source.receive(cfg)
@@ -580,6 +697,12 @@ def serve(args: argparse.Namespace) -> None:
                 except Exception:
                     LOG.exception("Bridge fault; waiting for COSMOS reconnection")
                 finally:
+                    if mode == 'fm':
+                        fm_audio.stop()
+                        try:
+                            source.configure(cfg)
+                        except Exception:
+                            LOG.exception('Could not restore spectrum on FM disconnect')
                     if mode == 'adsb':
                         adsb.stop()
                         try:
@@ -590,7 +713,8 @@ def serve(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--simulate", action="store_true", help="Synthetic FFT and fictional ADS-B data; no hardware")
+    parser.add_argument("--simulate", action="store_true", help="Synthetic FFT, ADS-B and FM; no hardware or speakers")
+    parser.add_argument("--fm-allow-extended", action="store_true", help="Allow broadcast FM (88-108 MHz) on frequency-extended Pluto")
     parser.add_argument("--readsb-path", default="readsb", help="readsb executable, compiled with PLUTOSDR=yes")
     parser.add_argument("--readsb-log", default="/tmp/pluto-cosmos-readsb.log", help="readsb process log")
     parser.add_argument("--uri", default="ip:192.168.2.1", help="Pluto libiio URI")
