@@ -8,7 +8,7 @@ This project connects an **Analog Devices ADALM-PLUTO (PlutoSDR)** to **OpenC3 C
 
 > **Scope:** This is a hobby/learning and systems-integration project, not a calibrated spectrum analyzer, certified surveillance receiver, or aviation-safety system. All modes are **receive-only**.
 >
-> [OpenC3 COSMOS](https://youtu.be/DD96PllEinE ) - video of functionality
+> [Youtube preview](https://youtu.be/DD96PllEinE ) - video of functionality
 
 ## Contents
 
