@@ -94,6 +94,13 @@ If no sound, check the bridge's `ERROR` log, the COSMOS `STATUS MESSAGE`, `pactl
 
 ## Tests
 
+
+I'd also recommend eventually adding a **`setup_wsl.sh` script** to your repository. That could install Linux dependencies, create the Python virtual environment, install Python requirements, and verify Pluto connectivity and Windows audio support.
+
+That would make it much easier to reproduce your setup on another computer or share the project with someone else.
+
+For now, your audio dependency is installed and verified. **We're ready to try live FM reception in COSMOS!**
+
 ```bash
 python3 -m unittest discover -s tests -v
 ```
